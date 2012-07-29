@@ -12,7 +12,6 @@ ltmain.sh
 missing
 install-sh
 autom4te.cache
-config.h*
 config.status
 config.guess
 config.sub
@@ -31,3 +30,9 @@ regtest/*/*.log
 regtest/*/*.log2
 regtest/*/DONE
 dist/*
+
+*.idb
+*.pdb
+*.vcproj*user
+*.ncb
+*.suo
