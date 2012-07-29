@@ -136,6 +136,7 @@ struct dbcontext : public dbcontext_i, private noncopyable {
   virtual bool check_alive();
   virtual void lock_tables_if();
   virtual void unlock_tables_if();
+  virtual int re_open_tables(char* dbname, char* tblname); 
   virtual bool get_commit_error();
   virtual void clear_error();
   virtual void close_tables_if();
@@ -369,9 +370,63 @@ dbcontext::check_alive()
   return true;
 }
 
+int
+dbcontext::re_open_tables(
+    char*     dbname,
+    char*     tblname
+) 
+{    
+    TABLE_LIST tables;
+    TABLE *table = 0;
+    bool refresh = true;
+    char*     p_dbname;
+    char*     p_tblname;
+    const thr_lock_type lock_type = for_write_flag ? TL_WRITE : TL_READ;
+    size_t    r_cnt = 0;
+    size_t    num_max = table_vec.size();
+
+    /* 关闭已打开的表 */
+close_again:
+    close_thread_tables(thd);
+
+    /* sleep 200毫秒 */
+    my_sleep(200);
+
+    /* 重新打开所有表，如果打开失败即重试 */
+    p_dbname = dbname;
+    p_tblname = tblname;
+    for	(size_t i = 0; i < num_max; ++i) {
+        tables.init_one_table(p_dbname, p_tblname, lock_type);
+
+        table = open_table(thd, &tables, thd->mem_root, &refresh, OPEN_VIEW_NO_PARSE);
+        if (!table)
+        {
+            DENA_VERBOSE(20, fprintf(stderr,
+                    "HNDSOCK failed to re_open %p [%s] [%s] [%d], retry count %u\n",
+                    thd, p_dbname, p_tblname, static_cast<int>(refresh), ++r_cnt));
+
+            goto close_again;
+        }
+
+        table->reginfo.lock_type = lock_type;
+        table->use_all_columns();
+
+        p_dbname += strlen(p_dbname) + 1;
+        p_tblname += strlen(p_tblname) + 1;
+
+        table_vec[i].table = table;
+    }
+
+    return 0;
+}
+
+
 void
 dbcontext::lock_tables_if()
 {
+  char*     dbname = NULL;
+  char*     tblname = NULL;
+
   if (lock_failed) {
     return;
   }
@@ -397,8 +452,55 @@ dbcontext::lock_tables_if()
     lock = thd->lock = mysql_lock_tables(thd, &tables[0], num_open, 0);
     #else
     bool need_reopen= false;
+    size_t   cnt = 0;
+lock_again:
     lock = thd->lock = mysql_lock_tables(thd, &tables[0], num_open,
       MYSQL_LOCK_NOTIFY_IF_NEED_REOPEN, &need_reopen);
+
+    if (lock == 0 && need_reopen) {
+        /* 获得表信息 */
+        if (dbname == NULL)
+        {
+            TABLE *table = 0;
+            char*     p_dbname = NULL;
+            char*     p_tblname = NULL;
+
+            /* 库名、表名最长是68字节，空间足够*/
+            p_dbname = dbname = (char*)malloc(table_vec.size() * 100);
+            p_tblname = tblname = (char*)malloc(table_vec.size() * 100);
+
+            for	(size_t i = 0; i < table_vec.size(); ++i) {
+                table = table_vec[i].table;
+
+                memcpy(p_dbname, table->s->db.str, table->s->db.length);
+                p_dbname[table->s->db.length] = 0;
+                p_dbname += table->s->db.length + 1;
+
+                memcpy(p_tblname, table->s->table_name.str, table->s->table_name.length);
+                p_tblname[table->s->table_name.length] = 0;
+                p_tblname += table->s->table_name.length + 1;
+            }
+        }
+
+        /* 不断open，直到成功为止（与mysql 逻辑一致） */
+        re_open_tables(dbname, tblname);
+        num_open = 0;
+        for (size_t i = 0; i < num_max; ++i) {
+            if (table_vec[i].refcount > 0) {
+                tables[num_open++] = table_vec[i].table;
+            }
+            table_vec[i].modified = false;
+        }
+
+        //直到成功为止（与mysql 逻辑一致）
+        DENA_VERBOSE(10, fprintf(stderr, "HNDSOCK try to lock_tables again,  try count %u\n", ++cnt));
+        goto lock_again;
+    }
+    if (dbname)
+    {
+        free(dbname);
+        free(tblname);
+    }
     #endif
     statistic_increment(lock_tables_count, &LOCK_status);
     thd_proc_info(thd, &info_message_buf[0]);

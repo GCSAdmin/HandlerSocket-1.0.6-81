@@ -118,6 +118,7 @@ struct dbcontext_i {
   virtual bool check_alive() = 0;
   virtual void lock_tables_if() = 0;
   virtual void unlock_tables_if() = 0;
+  virtual int re_open_tables(char* dbname, char* tblname) { return 0; }
   virtual bool get_commit_error() = 0;
   virtual void clear_error() = 0;
   virtual void close_tables_if() = 0;
